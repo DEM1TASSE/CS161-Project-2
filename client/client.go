@@ -100,28 +100,135 @@ func someUsefulThings() {
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
-	Username string
+	Username       string
+	SharestructKey []byte
 
-	// You can add other attributes here if you want! But note that in order for attributes to
-	// be included when this struct is serialized to/from JSON, they must be capitalized.
-	// On the flipside, if you have an attribute that you want to be able to access from
-	// this struct's methods, but you DON'T want that value to be included in the serialized value
-	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
-	// begins with a lowercase letter).
+	PrivateKey userlib.PKEDecKey
+	PublicKey  userlib.PKEEncKey
+
+	DSKey       userlib.DSSignKey
+	DSVerifyKey userlib.DSVerifyKey
+}
+
+type FileShare struct {
+	TreeNodeAddr userlib.UUID
+	Key          []byte
+	HMACKey      []byte
+}
+
+type TreeNode struct {
+	MetadataAddr userlib.UUID
+	Key          []byte
+	HMACKey      []byte
+
+	ShareAddr userlib.UUID
+	Owner     string
+
+	Root     userlib.UUID
+	Parent   userlib.UUID
+	Children []userlib.UUID
+}
+
+type FileMetaData struct {
+	StartAddress userlib.UUID
+	NextAddress  userlib.UUID
+	HMACKey      []byte
+	FileEncKey   []byte
+}
+
+type FileNode struct {
+	FileContent []byte
+	Next        userlib.UUID
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
-	userdata.Username = username
-	return &userdata, nil
+
+	//Check username empty or exist
+	if len(username) == 0 {
+		return nil, errors.New("Username shouldn't be empty.")
+	}
+
+	if len(password) == 0 {
+		return nil, errors.New("Password shouldn't be empty.")
+	}
+
+	//generate uuid
+	HashedUsername := userlib.Hash([]byte(username))
+	uuid, err := uuid.FromBytes(HashedUsername[:16])
+
+	_, exist := userlib.DatastoreGet(uuid)
+
+	//Check existence
+	if exist {
+		return nil, errors.New("User already exists.")
+	}
+
+	//generate sharestruct key
+	ShareKey, err := userlib.HashKDF(userlib.Hash([]byte(password))[:16], []byte("encryption"))
+	userdata.SharestructKey = ShareKey[:16]
+
+	//generate private key and public key
+	userdata.PublicKey, userdata.PrivateKey, err = userlib.PKEKeyGen()
+
+	//generate signature key
+	userdata.DSKey, userdata.DSVerifyKey, err = userlib.DSKeyGen()
+	if err != nil {
+		return nil, err
+	}
+
+	//store public key
+	userlib.KeystoreSet(username+"_PK", userdata.PublicKey)
+	userlib.KeystoreSet(username+"_Sign", userdata.DSVerifyKey)
+
+	//encrypt user
+	UserData, err := json.Marshal(userdata)
+	EncKey := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username)), 16)
+	IV := userlib.RandomBytes(16)
+	UserEnc := userlib.SymEnc(EncKey, IV , UserData)
+
+	HashKey := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username+password)), 16)
+	UserHash, err := userlib.HMACEval(HashKey, UserEnc)
+
+	//store user data
+	data := append(UserEnc, UserHash...)
+	userlib.DatastoreSet(uuid, data)
+
+	return &userdata, err
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
-	userdataptr = &userdata
-	return userdataptr, nil
+
+	HashedUsername := userlib.Hash([]byte(username))
+	uuid, err := uuid.FromBytes(HashedUsername[:16])
+	UserData, exist := userlib.DatastoreGet(uuid)
+
+	//Check existence
+	if !exist {
+		return nil, errors.New("User doesn't exist.")
+	}
+
+	//Check Integrity
+	if len(UserData) < 64 {
+		return nil, errors.New("User data length < 64")
+	}
+
+	//Verify integrity
+	HashCal := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username+password)), 16)
+	UserHash, err := userlib.HMACEval(HashCal, UserData[:len(UserData)-64])
+	if !userlib.HMACEqual(UserHash, UserData[len(UserData)-64:]) {
+		return nil, errors.New("User data no integrity")
+	}
+
+	//Unmarshal decrypted data
+	EncKey := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username)), 16)
+	UserData = userlib.SymDec(EncKey, UserData[:len(UserData)-64])
+	err = json.Unmarshal(UserData, &userdata)
+
+	return &userdata, err
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
@@ -166,3 +273,5 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
 	return nil
 }
+
+

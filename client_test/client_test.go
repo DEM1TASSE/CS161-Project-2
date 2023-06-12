@@ -243,5 +243,64 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).ToNot(BeNil())
 		})
 
+		Describe("Creating users", func() {
+
+			It("should not error when creating a new user", func() {
+				_, err := client.InitUser("Alice", "password")
+				Expect(err).To(BeNil())
+			})
+	
+			It("should error if a username is already taken by another user", func() {
+				_, err1 := client.InitUser("Alice", "password")
+				_, err2 := client.InitUser("Alice", "password")
+				Expect(err1).To(BeNil())
+				Expect(err2).ToNot(BeNil())
+			})
+	
+			It("should error if a user tries to create a user with an empty username", func() {
+				_, err := client.InitUser("", "password")
+				Expect(err).ToNot(BeNil())
+			})
+	
+			It("shouldn't error if a user tries to create a user with an empty password", func() {
+				_, err := client.InitUser("Alice", "")
+				Expect(err).ToNot(BeNil())
+			})
+	
+			It("should allow case sensitive usernames", func() {
+				_, err1 := client.InitUser("ALICE", "password")
+				_, err2 := client.InitUser("alice", "password")
+				Expect(err1).To(BeNil(), "user does not exist")
+				Expect(err2).To(BeNil(), "user does not exist")
+			})
+
+			It("should allow a user to login with the correct password", func() {
+				_, err1 := client.InitUser("Alice", "password")
+				Expect(err1).To(BeNil(), "user does not exist")
+				_, err2 := client.GetUser("Alice", "password")
+				Expect(err2).To(BeNil(), "user does not exist")
+			})
+	
+			It("should error if a user does not enter the correct password", func() {
+				_, err1 := client.InitUser("Alice", "password")
+				Expect(err1).To(BeNil(), "user does not exist")
+				_, err2 := client.GetUser("Alice", "lalala")
+				Expect(err2).ToNot(BeNil())
+			})
+	
+			It("should error if a user does not exist with that username", func() {
+				_, err := client.GetUser("Alice", "password")
+				Expect(err).ToNot(BeNil())
+			})
+
+			It("should not error if two user use same password", func() {
+				_, err := client.GetUser("Alice", "password")
+				Expect(err).ToNot(BeNil())
+				_, err1 := client.GetUser("Bob", "password")
+				Expect(err1).ToNot(BeNil())
+			})
+		})
+	
+
 	})
 })
