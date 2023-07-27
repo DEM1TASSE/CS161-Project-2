@@ -84,6 +84,8 @@ func someUsefulThings() {
 	userlib.DebugMsg("Original Key: %v", originalKey)
 	userlib.DebugMsg("Derived Key: %v", derivedKey)
 
+	_ = strings.ToLower("Hello")
+
 	// A couple of tips on converting between string and []byte:
 	// To convert from string to []byte, use []byte("some-string-here")
 	// To convert from []byte to string for debugging, use fmt.Sprintf("hello world: %s", some_byte_arr).
@@ -100,8 +102,8 @@ func someUsefulThings() {
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
-	Username       string
-	SharestructKey []byte
+	Username  string
+	SourceKey []byte
 
 	PrivateKey userlib.PKEDecKey
 	PublicKey  userlib.PKEEncKey
@@ -110,30 +112,28 @@ type User struct {
 	DSVerifyKey userlib.DSVerifyKey
 }
 
-type FileShare struct {
-	TreeNodeAddr userlib.UUID
-	Key          []byte
-	HMACKey      []byte
-}
+type FileEntry struct {
+	FileMetaAddr userlib.UUID
+	Status       string //own or share
 
-type TreeNode struct {
-	MetadataAddr userlib.UUID
-	Key          []byte
-	HMACKey      []byte
-
-	ShareAddr userlib.UUID
-	Owner     string
-
-	Root     userlib.UUID
-	Parent   userlib.UUID
-	Children []userlib.UUID
+	EncKey  []byte //For file meta data
+	HMACKey []byte
 }
 
 type FileMetaData struct {
+	//Owner and Share Info
+	Owner string
+	// Status string //metadata or share
+	ShareList userlib.UUID
+
+	//File Info
+	FileName     string
 	StartAddress userlib.UUID
-	NextAddress  userlib.UUID
-	HMACKey      []byte
-	FileEncKey   []byte
+	NextAddress  userlib.UUID //For Effecient Append
+
+	//Key
+	HMACKey    []byte //For file node
+	FileEncKey []byte
 }
 
 type FileNode struct {
@@ -148,14 +148,17 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	//Check username empty or exist
 	if len(username) == 0 {
-		return nil, errors.New("Username shouldn't be empty.")
+		return nil, errors.New("InitUser: Username shouldn't be empty.")
 	}
 
-	if len(password) == 0 {
-		return nil, errors.New("Password shouldn't be empty.")
-	}
+	//Password lenth can be 0
+	// if len(password) == 0 {
+	// 	return nil, errors.New("InitUser: Password shouldn't be empty.")
+	// }
 
-	//generate uuid
+	userdata.Username = username
+
+	//Generate uuid
 	HashedUsername := userlib.Hash([]byte(username))
 	uuid, err := uuid.FromBytes(HashedUsername[:16])
 
@@ -163,36 +166,35 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	//Check existence
 	if exist {
-		return nil, errors.New("User already exists.")
+		return nil, errors.New("InitUser: Username already exists.")
 	}
 
-	//generate sharestruct key
-	ShareKey, err := userlib.HashKDF(userlib.Hash([]byte(password))[:16], []byte("encryption"))
-	userdata.SharestructKey = ShareKey[:16]
+	//Generate source key
+	userdata.SourceKey = userlib.RandomBytes(16)
 
-	//generate private key and public key
+	//Generate private key and public key
 	userdata.PublicKey, userdata.PrivateKey, err = userlib.PKEKeyGen()
 
-	//generate signature key
+	//Generate signature key
 	userdata.DSKey, userdata.DSVerifyKey, err = userlib.DSKeyGen()
 	if err != nil {
 		return nil, err
 	}
 
-	//store public key
+	//Store public key
 	userlib.KeystoreSet(username+"_PK", userdata.PublicKey)
 	userlib.KeystoreSet(username+"_Sign", userdata.DSVerifyKey)
 
-	//encrypt user
+	//Encrypt user
 	UserData, err := json.Marshal(userdata)
 	EncKey := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username)), 16)
 	IV := userlib.RandomBytes(16)
-	UserEnc := userlib.SymEnc(EncKey, IV , UserData)
+	UserEnc := userlib.SymEnc(EncKey, IV, UserData)
 
 	HashKey := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username+password)), 16)
 	UserHash, err := userlib.HMACEval(HashKey, UserEnc)
 
-	//store user data
+	//Store user data
 	data := append(UserEnc, UserHash...)
 	userlib.DatastoreSet(uuid, data)
 
@@ -208,19 +210,19 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 	//Check existence
 	if !exist {
-		return nil, errors.New("User doesn't exist.")
+		return nil, errors.New("GetUser: User doesn't exist.")
 	}
 
 	//Check Integrity
 	if len(UserData) < 64 {
-		return nil, errors.New("User data length < 64")
+		return nil, errors.New("GetUser: User data length < 64")
 	}
 
 	//Verify integrity
 	HashCal := userlib.Argon2Key([]byte(password), userlib.Hash([]byte(username+password)), 16)
 	UserHash, err := userlib.HMACEval(HashCal, UserData[:len(UserData)-64])
 	if !userlib.HMACEqual(UserHash, UserData[len(UserData)-64:]) {
-		return nil, errors.New("User data no integrity")
+		return nil, errors.New("GetUser: User data has no integrity")
 	}
 
 	//Unmarshal decrypted data
@@ -232,32 +234,418 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	if err != nil {
-		return err
+	//Every user have a independent UserFileList
+
+	//Calculate uuid for UserFileList
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileList, exist := userlib.DatastoreGet(UserFileListAddr)
+
+	//Calculate user file list EncKey from Source Key
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+
+	//Calculate user file list HMACKey from Source Key
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	curFileList := make(map[string]FileEntry)
+
+	//If UserFileList exist, decrypt it
+	if exist {
+		//Check length
+		length := len(UserFileList)
+		if length < 64 {
+			return errors.New("StoreFile: User File List length < 64")
+		}
+
+		//Check Integrity
+		FileListEnc := UserFileList[:length-64]
+
+		// FileListHash := UserFileList[length-64:]
+		FileListHashCal, err := userlib.HMACEval(HMACKey, FileListEnc)
+		if err != nil {
+			return err
+		}
+
+		if !userlib.HMACEqual(FileListHashCal, UserFileList[length-64:]) {
+			return errors.New("StoreFile: User File List has no integrity")
+		}
+
+		//Decrypt UserFileList
+		userFileListData := userlib.SymDec(SymKey, FileListEnc)
+		err = json.Unmarshal(userFileListData, &curFileList)
 	}
-	contentBytes, err := json.Marshal(content)
-	if err != nil {
-		return err
+
+	var curFileEntry FileEntry
+	curFileEntry, exist = curFileList[filename]
+	var curFileMeta FileMetaData
+	var curFileNode FileNode
+
+	//If filename not exist, create new filenode, filemetadata, file entry
+	if !exist {
+		//Create file node
+		startAddr := uuid.New()
+		curFileNode.FileContent = content
+		curFileNode.Next = uuid.New()
+
+		//Generate file key
+		fileEncKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("fileEncKey"))
+		fileEncKey = fileEncKey[:16]
+
+		fileHMACKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("fileHMACKey"))
+		fileHMACKey = fileHMACKey[:16]
+		if err != nil {
+			return errors.New("StoreFile: Fail to generate file keys")
+		}
+
+		//Store file node
+		fileNodeData, err := json.Marshal(curFileNode)
+		IV := userlib.RandomBytes(16)
+		fileNodeEnc := userlib.SymEnc(fileEncKey, IV, fileNodeData)
+		fileNodeHMAC, err := userlib.HMACEval(fileHMACKey, fileNodeEnc)
+		fileNodeEnc = append(fileNodeEnc, fileNodeHMAC...)
+		userlib.DatastoreSet(startAddr, fileNodeEnc)
+		userlib.DebugMsg("startAddr:", startAddr)
+
+		//Create file metadata
+		curFileMeta.Owner = userdata.Username
+		curFileMeta.FileName = filename
+		curFileMeta.FileEncKey = fileEncKey
+		curFileMeta.HMACKey = fileHMACKey
+		curFileMeta.StartAddress = startAddr
+		curFileMeta.NextAddress = curFileNode.Next
+
+		//Metadata keys
+		metadataEncKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("metadataEncKey"))
+		metadataEncKey = metadataEncKey[:16]
+		metadataHMACKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("metadataHMACKey"))
+		metadataHMACKey = metadataHMACKey[:16]
+		if err != nil {
+			return errors.New("StoreFile: Fail to generate metadata keys")
+		}
+
+		//Store Metadata
+		metadataBytes, err := json.Marshal(curFileMeta)
+		metadataEnc := userlib.SymEnc(metadataEncKey, userlib.RandomBytes(16), metadataBytes)
+		metadataHMAC, err := userlib.HMACEval(metadataHMACKey, metadataEnc)
+		if err != nil {
+			return errors.New("StoreFile: Fail to encrypt Metadata")
+		}
+		metadataEnc = append(metadataEnc, metadataHMAC...)
+		metadataAddr := uuid.New()
+		userlib.DatastoreSet(metadataAddr, metadataEnc)
+
+		//Create file entry
+		curFileEntry.Status = "Own"
+		curFileEntry.EncKey = metadataEncKey
+		curFileEntry.HMACKey = metadataHMACKey
+		curFileEntry.FileMetaAddr = metadataAddr
+
+		curFileList[filename] = curFileEntry
+	} else {
+		//Get and decrypt metadata
+		curFileMetaAddr := curFileEntry.FileMetaAddr
+		curFileMetaEncKey := curFileEntry.EncKey
+		curFileMetaHMACKey := curFileEntry.HMACKey
+
+		// Get metadata
+		fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+		if !exist {
+			return errors.New("StoreFile: File metadata not exist")
+		}
+
+		// Check metadata integrity
+		fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+		hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+		if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+			return errors.New("StoreFile: File metadata no integrity")
+		}
+
+		// Decrypt metadata
+		fileMetaBytes := userlib.SymDec(curFileMetaEncKey, fileMetaEnc[:len(fileMetaEnc)-64])
+		var fileMeta FileMetaData
+		err = json.Unmarshal(fileMetaBytes, &fileMeta)
+		if err != nil {
+			return errors.New("StoreFile: Error unmarshaling file metadata")
+		}
+
+		//Delete old file
+		curAddr := fileMeta.StartAddress
+		for {
+			// Load current file node
+			fileNodeEnc, exist := userlib.DatastoreGet(curAddr)
+			if !exist {
+				return errors.New("StoreFile: Old File Node not exist")
+			}
+
+			// check file node integrity
+			fileNodeHMAC := fileNodeEnc[len(fileNodeEnc)-64:]
+			hmacCal, err := userlib.HMACEval(fileMeta.HMACKey, fileNodeEnc[:len(fileNodeEnc)-64])
+			if err != nil || !userlib.HMACEqual(hmacCal, fileNodeHMAC) {
+				return errors.New("StoreFile: Old File Node no integrity")
+			}
+
+			// decrypt node
+			fileNodeBytes := userlib.SymDec(fileMeta.FileEncKey, fileNodeEnc[:len(fileNodeEnc)-64])
+			var fileNode FileNode
+			err = json.Unmarshal(fileNodeBytes, &fileNode)
+			if err != nil {
+				return errors.New("StoreFile: Error unmarshaling file node")
+			}
+
+			//delete current node
+			userlib.DatastoreDelete(curAddr)
+
+			if fileNode.Next == fileMeta.NextAddress {
+				break
+			}
+
+			curAddr = fileNode.Next
+		}
+
+		//Create new file and store
+		var newFileNode FileNode
+		newNodeAddr := uuid.New()
+		newNextAddr := uuid.New()
+
+		newFileNode.FileContent = content
+		newFileNode.Next = newNextAddr
+
+		fileNodeData, err := json.Marshal(newFileNode)
+		IV := userlib.RandomBytes(16)
+		fileNodeEnc := userlib.SymEnc(fileMeta.FileEncKey, IV, fileNodeData)
+		fileNodeHMAC, err := userlib.HMACEval(fileMeta.HMACKey, fileNodeEnc)
+		fileNodeEnc = append(fileNodeEnc, fileNodeHMAC...)
+		userlib.DatastoreSet(newNodeAddr, fileNodeEnc)
+
+		//update metadata and store
+		fileMeta.StartAddress = newNodeAddr
+		fileMeta.NextAddress = newFileNode.Next
+
+		//store metadata
+		metadataBytes, err := json.Marshal(fileMeta)
+		IV = userlib.RandomBytes(16)
+		metadataEnc := userlib.SymEnc(curFileMetaEncKey, IV, metadataBytes)
+		metadataHMAC, err := userlib.HMACEval(curFileMetaHMACKey, metadataEnc)
+		if err != nil {
+			return errors.New("AppendToFile: Fail to encrypt when update metadata")
+		}
+		metadataEnc = append(metadataEnc, metadataHMAC...)
+		userlib.DatastoreSet(curFileMetaAddr, metadataEnc)
 	}
-	userlib.DatastoreSet(storageKey, contentBytes)
-	return
+
+	//Store User File List
+	fileListBytes, _ := json.Marshal(curFileList)
+	IV := userlib.RandomBytes(16)
+	FileListEnc := userlib.SymEnc(SymKey, IV, fileListBytes)
+	FileListHMAC, err := userlib.HMACEval(HMACKey, FileListEnc)
+	fileListBytes = append(FileListEnc, FileListHMAC...)
+	userlib.DatastoreSet(UserFileListAddr, fileListBytes)
+
+	return err
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
-	return nil
+	//Calculate user file list EncKey from Source Key
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+
+	//Calculate user file list HMACKey from Source Key
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	//Calculate uuid for UserFileList
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+
+	if !exist {
+		return errors.New("AppendToFile: User File List not exist")
+	}
+
+	//Check integrity
+	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+
+	HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+	if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+		return errors.New("AppendToFile: User File List no integrity")
+	}
+
+	//Decrypt UserFileList
+	UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+
+	curFileList := make(map[string]FileEntry)
+	err = json.Unmarshal(UserFileListBytes, &curFileList)
+	if err != nil {
+		return err
+	}
+
+	curFileEntry, exist := curFileList[filename]
+	if !exist {
+		return errors.New("AppendToFile: File entry not exist")
+	}
+
+	curFileMetaAddr := curFileEntry.FileMetaAddr
+	curFileMetaEncKey := curFileEntry.EncKey
+	curFileMetaHMACKey := curFileEntry.HMACKey
+
+	// Get metadata
+	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+	if !exist {
+		return errors.New("AppendToFile: File metadata not exist")
+	}
+
+	// Check metadata integrity
+	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+	hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+		return errors.New("AppendToFile: File metadata no integrity")
+	}
+
+	// Decrypt metadata
+	fileMetaBytes := userlib.SymDec(curFileMetaEncKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	var fileMeta FileMetaData
+	err = json.Unmarshal(fileMetaBytes, &fileMeta)
+	if err != nil {
+		return errors.New("LoadFile: Error unmarshaling file metadata")
+	}
+
+	// Create new node
+	newNode := FileNode{
+		FileContent: content,
+		Next:        uuid.New(),
+	}
+
+	newNodeData, err := json.Marshal(newNode)
+	IV := userlib.RandomBytes(16)
+	newNodeEnc := userlib.SymEnc(fileMeta.FileEncKey, IV, newNodeData)
+	newNodeHMAC, err := userlib.HMACEval(fileMeta.HMACKey, newNodeEnc)
+	newNodeEnc = append(newNodeEnc, newNodeHMAC...)
+	userlib.DatastoreSet(fileMeta.NextAddress, newNodeEnc)
+
+	//update FileMeta
+	fileMeta.NextAddress = newNode.Next
+
+	//store metadata
+	metadataBytes, err := json.Marshal(fileMeta)
+	IV = userlib.RandomBytes(16)
+	metadataEnc := userlib.SymEnc(curFileMetaEncKey, IV, metadataBytes)
+	metadataHMAC, err := userlib.HMACEval(curFileMetaHMACKey, metadataEnc)
+	if err != nil {
+		return errors.New("AppendToFile: Fail to encrypt when update metadata")
+	}
+	metadataEnc = append(metadataEnc, metadataHMAC...)
+	userlib.DatastoreSet(curFileMetaAddr, metadataEnc)
+
+	return err
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	//Calculate user file list EncKey from Source Key
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+	userlib.DebugMsg("SymKey", SymKey)
+
+	//Calculate user file list HMACKey from Source Key
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	//Calculate uuid for UserFileList
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+
+	if !exist {
+		return nil, errors.New("LoadFile: User File List not exist")
+	}
+
+	//Check integrity
+	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+
+	HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+	if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+		return nil, errors.New("LoadFile: User File List no integrity")
+	}
+
+	//Decrypt UserFileList
+	UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+
+	curFileList := make(map[string]FileEntry)
+	err = json.Unmarshal(UserFileListBytes, &curFileList)
 	if err != nil {
 		return nil, err
 	}
-	dataJSON, ok := userlib.DatastoreGet(storageKey)
-	if !ok {
-		return nil, errors.New(strings.ToTitle("file not found"))
+	// userlib.DebugMsg("curFileList:",curFileList)
+
+	curFileEntry, exist := curFileList[filename]
+	// userlib.DebugMsg("curFileEntry:",curFileEntry)
+	if !exist {
+		userlib.DebugMsg("curFileList:", curFileList)
+		return nil, errors.New("LoadFile: File entry not exist")
 	}
-	err = json.Unmarshal(dataJSON, &content)
+
+	curFileMetaAddr := curFileEntry.FileMetaAddr
+	curFileMetaEncKey := curFileEntry.EncKey
+	curFileMetaHMACKey := curFileEntry.HMACKey
+
+	userlib.DebugMsg("curFileMetaAddr:", curFileMetaAddr)
+
+	// Get metadata
+	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+	if !exist {
+		return nil, errors.New("LoadFile: File metadata not exist")
+	}
+
+	// Check metadata integrity
+	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+	hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+		return nil, errors.New("LoadFile: File metadata no integrity")
+	}
+
+	// Decrypt metadata
+	fileMetaBytes := userlib.SymDec(curFileMetaEncKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	var fileMeta FileMetaData
+	err = json.Unmarshal(fileMetaBytes, &fileMeta)
+	if err != nil {
+		return nil, errors.New("LoadFile: Error unmarshaling file metadata")
+	}
+
+	// Load File Content
+	curAddr := fileMeta.StartAddress
+
+	for {
+		// Load current file node
+		fileNodeEnc, exist := userlib.DatastoreGet(curAddr)
+		if !exist {
+			return nil, errors.New("LoadFile: File node not exist")
+		}
+
+		// check file node integrity
+		fileNodeHMAC := fileNodeEnc[len(fileNodeEnc)-64:]
+		hmacCal, err := userlib.HMACEval(fileMeta.HMACKey, fileNodeEnc[:len(fileNodeEnc)-64])
+		if err != nil || !userlib.HMACEqual(hmacCal, fileNodeHMAC) {
+			return nil, errors.New("LoadFile: File Node no integrity")
+		}
+
+		// decrypt node
+		fileNodeBytes := userlib.SymDec(fileMeta.FileEncKey, fileNodeEnc[:len(fileNodeEnc)-64])
+		var fileNode FileNode
+		err = json.Unmarshal(fileNodeBytes, &fileNode)
+		if err != nil {
+			return nil, errors.New("LoadFile: Error unmarshaling file node")
+		}
+
+		// append node content
+		content = append(content, fileNode.FileContent...)
+
+		if fileNode.Next == fileMeta.NextAddress {
+			break
+		}
+
+		curAddr = fileNode.Next
+	}
+
 	return content, err
 }
 
@@ -273,5 +661,3 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
 	return nil
 }
-
-

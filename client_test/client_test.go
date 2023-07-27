@@ -243,61 +243,190 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).ToNot(BeNil())
 		})
 
-		Describe("Creating users", func() {
+		Describe("InitUser", func() {
 
-			It("should not error when creating a new user", func() {
+			It("Init new user", func() {
 				_, err := client.InitUser("Alice", "password")
 				Expect(err).To(BeNil())
 			})
 	
-			It("should error if a username is already taken by another user", func() {
+			It("InitUser: Username case sensitive", func() {
+				_, err1 := client.InitUser("ALICE", "password")
+				_, err2 := client.InitUser("alice", "password")
+				Expect(err1).To(BeNil(), "user does not exist")
+				Expect(err2).To(BeNil(), "user does not exist")
+			})
+	
+			It("InitUser: No error if password empty", func() {
+				_, err := client.InitUser("Alice", "")
+				Expect(err).To(BeNil())
+			})
+
+			It("InitUser: Error if username already exist", func() {
 				_, err1 := client.InitUser("Alice", "password")
 				_, err2 := client.InitUser("Alice", "password")
 				Expect(err1).To(BeNil())
 				Expect(err2).ToNot(BeNil())
 			})
 	
-			It("should error if a user tries to create a user with an empty username", func() {
+			It("InitUser: Error if username empty", func() {
 				_, err := client.InitUser("", "password")
 				Expect(err).ToNot(BeNil())
 			})
-	
-			It("shouldn't error if a user tries to create a user with an empty password", func() {
-				_, err := client.InitUser("Alice", "")
-				Expect(err).ToNot(BeNil())
-			})
-	
-			It("should allow case sensitive usernames", func() {
-				_, err1 := client.InitUser("ALICE", "password")
-				_, err2 := client.InitUser("alice", "password")
-				Expect(err1).To(BeNil(), "user does not exist")
-				Expect(err2).To(BeNil(), "user does not exist")
-			})
+		})
 
-			It("should allow a user to login with the correct password", func() {
+		Describe("GetUser", func() {
+			It("Get User: correct password", func() {
 				_, err1 := client.InitUser("Alice", "password")
-				Expect(err1).To(BeNil(), "user does not exist")
+				Expect(err1).To(BeNil())
 				_, err2 := client.GetUser("Alice", "password")
-				Expect(err2).To(BeNil(), "user does not exist")
+				Expect(err2).To(BeNil())
 			})
 	
-			It("should error if a user does not enter the correct password", func() {
+			It("GetUser: Error if wrong password", func() {
 				_, err1 := client.InitUser("Alice", "password")
-				Expect(err1).To(BeNil(), "user does not exist")
-				_, err2 := client.GetUser("Alice", "lalala")
+				Expect(err1).To(BeNil())
+				_, err2 := client.GetUser("Alice", "wrongpassword")
 				Expect(err2).ToNot(BeNil())
 			})
 	
-			It("should error if a user does not exist with that username", func() {
+			It("GetUser: Error if user not exist", func() {
 				_, err := client.GetUser("Alice", "password")
 				Expect(err).ToNot(BeNil())
 			})
 
-			It("should not error if two user use same password", func() {
-				_, err := client.GetUser("Alice", "password")
+			It("GetUser: No Error if users have same password", func() {
+				_, err := client.InitUser("Alice", "password")
+				Expect(err).To(BeNil())
+				_, err1 := client.GetUser("Alice", "password")
+				Expect(err1).To(BeNil())
+				_, err2 := client.InitUser("Bob", "password")
+				Expect(err2).To(BeNil())
+				_, err3 := client.GetUser("Bob", "password")
+				Expect(err3).To(BeNil())
+			})
+		})
+
+		Describe("StoreFile and LoadFile", func() {
+			It("filename can be empty", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile("", []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				data, err := alice.LoadFile("")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+
+				err = alice.AppendToFile("", []byte(contentTwo))
+				Expect(err).To(BeNil())
+
+				data, err = alice.LoadFile("")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne+contentTwo)))
+			})
+
+			It("error if load or append file not exist", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				_, err := alice.LoadFile("file2")
 				Expect(err).ToNot(BeNil())
-				_, err1 := client.GetUser("Bob", "password")
-				Expect(err1).ToNot(BeNil())
+
+				err = alice.AppendToFile("file2", []byte(contentTwo))
+				Expect(err).ToNot(BeNil())
+			})
+
+			It("2 user can use same filename", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				bob, err = client.InitUser("bob", defaultPassword)
+				Expect(err).To(BeNil())
+	
+				err = alice.StoreFile("file1", []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				err = bob.StoreFile("file1", []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				data, err := alice.LoadFile("file1")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+
+				data, err = bob.LoadFile("file1")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+			})
+
+			It("StoreFile and Load File", func() {
+				userlib.DebugMsg("Initializing user Alice.")
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+	
+				userlib.DebugMsg("Storing file data: %s", contentOne)
+				err = alice.StoreFile("file1", []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Storing file data: %s", contentTwo)
+				err = alice.StoreFile("file2", []byte(contentTwo))
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Loading file...")
+				data, err := alice.LoadFile("file1")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+
+				userlib.DebugMsg("Loading file...")
+				data1, err := alice.LoadFile("file2")
+				Expect(err).To(BeNil())
+				userlib.DebugMsg("file2:",string(data1))
+				
+			})
+
+			It("StoreFile, Append, and Load File", func() {
+				userlib.DebugMsg("Initializing user Alice.")
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Storing file data: %s", contentOne)
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Appending file data: %s", contentTwo)
+				err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Appending file data: %s", contentThree)
+				err = alice.AppendToFile(aliceFile, []byte(contentThree))
+				Expect(err).To(BeNil())
+
+				userlib.DebugMsg("Loading file...")
+				data, err := alice.LoadFile(aliceFile)
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+				userlib.DebugMsg("Final File:", string(data))
+			})
+
+			It("StoreFile same file twice", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				data, err := alice.LoadFile(aliceFile)
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+
+				err = alice.StoreFile(aliceFile, []byte(contentTwo))
+				Expect(err).To(BeNil())
+
+				data, err = alice.LoadFile(aliceFile)
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentTwo)))
+				userlib.DebugMsg("Final File:", string(data))
 			})
 		})
 	
