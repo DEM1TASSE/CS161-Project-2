@@ -50,8 +50,8 @@ var _ = Describe("Client Tests", func() {
 	var alice *client.User
 	var bob *client.User
 	var charles *client.User
-	// var doris *client.User
-	// var eve *client.User
+	var doris *client.User
+	var eve *client.User
 	// var frank *client.User
 	// var grace *client.User
 	// var horace *client.User
@@ -68,8 +68,8 @@ var _ = Describe("Client Tests", func() {
 	aliceFile := "aliceFile.txt"
 	bobFile := "bobFile.txt"
 	charlesFile := "charlesFile.txt"
-	// dorisFile := "dorisFile.txt"
-	// eveFile := "eveFile.txt"
+	dorisFile := "dorisFile.txt"
+	eveFile := "eveFile.txt"
 	// frankFile := "frankFile.txt"
 	// graceFile := "graceFile.txt"
 	// horaceFile := "horaceFile.txt"
@@ -428,6 +428,140 @@ var _ = Describe("Client Tests", func() {
 				Expect(data).To(Equal([]byte(contentTwo)))
 				userlib.DebugMsg("Final File:", string(data))
 			})
+		})
+
+		Describe("Create Invitation", func() {
+			It("Error if invalid username", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+	
+				_, err := alice.CreateInvitation(aliceFile, "bob")
+				Expect(err).ToNot(BeNil())
+			})
+
+			It("Valid Invitation", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				bob, err = client.InitUser("bob", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+	
+				invitation, err := alice.CreateInvitation(aliceFile, "bob")
+				Expect(err).To(BeNil())
+
+				err = bob.AcceptInvitation("alice", invitation, "aliceFile")
+				Expect(err).To(BeNil())
+
+				data, err := bob.LoadFile("aliceFile")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne)))
+
+				err = bob.AppendToFile("aliceFile", []byte(contentTwo))
+				Expect(err).To(BeNil())
+
+				data, err = bob.LoadFile("aliceFile")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+
+				err = bob.StoreFile("aliceFile", []byte(contentThree))
+				Expect(err).To(BeNil())
+
+				data, err = bob.LoadFile("aliceFile")
+				Expect(err).To(BeNil())
+				Expect(data).To(Equal([]byte(contentThree)))
+			})
+
+			It("Error if load file before accept invitation", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				bob, err = client.InitUser("bob", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+	
+				_, err := alice.CreateInvitation(aliceFile, "bob")
+				Expect(err).To(BeNil())
+
+				_, err1 := bob.LoadFile("aliceFile")
+				Expect(err1).ToNot(BeNil())
+			})
+
+			It("Error if store file and accept file using same file name", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				bob, err = client.InitUser("bob", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile("file", []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				err = bob.StoreFile("file", []byte(contentOne))
+				Expect(err).To(BeNil())
+	
+				invitation, err := alice.CreateInvitation("file", "bob")
+				Expect(err).To(BeNil())
+
+				err = bob.AcceptInvitation("alice", invitation, "file")
+				Expect(err).ToNot(BeNil())
+			})
+
+			It("Tree invitation", func() {
+				//alice -> bob&charles, bob->doris, charles->eve
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
+
+				bob, err = client.InitUser("bob", defaultPassword)
+				Expect(err).To(BeNil())
+
+				charles, err = client.InitUser("charles", defaultPassword)
+				Expect(err).To(BeNil())
+
+				doris, err = client.InitUser("doris", defaultPassword)
+				Expect(err).To(BeNil())
+
+				eve, err = client.InitUser("eve", defaultPassword)
+				Expect(err).To(BeNil())
+
+				err = alice.StoreFile(aliceFile, []byte(contentOne))
+				Expect(err).To(BeNil())
+
+				invitation, err := alice.CreateInvitation(aliceFile, "bob")
+				Expect(err).To(BeNil())
+
+				err = bob.AcceptInvitation("alice", invitation, bobFile)
+				Expect(err).To(BeNil())
+
+				//alice -> charles
+				invitation, err = alice.CreateInvitation(aliceFile, "charles")
+				Expect(err).To(BeNil())
+
+				err = charles.AcceptInvitation("alice", invitation, charlesFile)
+				Expect(err).To(BeNil())
+
+				//bob -> doris
+				invitation, err = bob.CreateInvitation(bobFile, "doris")
+				Expect(err).To(BeNil())
+
+				err = doris.AcceptInvitation("bob", invitation, dorisFile)
+				Expect(err).To(BeNil())
+
+				//charles -> eve
+				invitation, err = charles.CreateInvitation(charlesFile, "eve")
+				Expect(err).To(BeNil())
+
+				err = eve.AcceptInvitation("charles", invitation, eveFile)
+				Expect(err).To(BeNil())
+			})
+
 		})
 	
 

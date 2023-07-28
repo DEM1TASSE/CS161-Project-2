@@ -114,16 +114,15 @@ type User struct {
 
 type FileEntry struct {
 	FileMetaAddr userlib.UUID
-	Status       string //own or share
+	Status       string //Own or Share or Received
 
-	EncKey  []byte //For file meta data
+	EncKey  []byte //For file metadata
 	HMACKey []byte
 }
 
 type FileMetaData struct {
 	//Owner and Share Info
-	Owner string
-	// Status string //metadata or share
+	Owner     string
 	ShareList userlib.UUID
 
 	//File Info
@@ -139,6 +138,17 @@ type FileMetaData struct {
 type FileNode struct {
 	FileContent []byte
 	Next        userlib.UUID
+}
+
+type Invitation struct {
+	ShareAddr userlib.UUID
+	EncKey    []byte
+	HMACKey   []byte
+}
+
+type ShareEntry struct {
+	Sender    string
+	Recipient string
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -305,7 +315,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		fileNodeHMAC, err := userlib.HMACEval(fileHMACKey, fileNodeEnc)
 		fileNodeEnc = append(fileNodeEnc, fileNodeHMAC...)
 		userlib.DatastoreSet(startAddr, fileNodeEnc)
-		userlib.DebugMsg("startAddr:", startAddr)
+		// userlib.DebugMsg("startAddr:", startAddr)
 
 		//Create file metadata
 		curFileMeta.Owner = userdata.Username
@@ -523,10 +533,10 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	newNodeEnc = append(newNodeEnc, newNodeHMAC...)
 	userlib.DatastoreSet(fileMeta.NextAddress, newNodeEnc)
 
-	//update FileMeta
+	// Update FileMeta
 	fileMeta.NextAddress = newNode.Next
 
-	//store metadata
+	// Store metadata
 	metadataBytes, err := json.Marshal(fileMeta)
 	IV = userlib.RandomBytes(16)
 	metadataEnc := userlib.SymEnc(curFileMetaEncKey, IV, metadataBytes)
@@ -544,7 +554,7 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	//Calculate user file list EncKey from Source Key
 	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
 	SymKey = SymKey[:16]
-	userlib.DebugMsg("SymKey", SymKey)
+	// userlib.DebugMsg("SymKey", SymKey)
 
 	//Calculate user file list HMACKey from Source Key
 	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
@@ -651,11 +661,244 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
-	return
+	/*
+		1. Read FileEntry - Get file metadata
+		2. Verify metadata integrity
+		3. Generate FileEntryCopy for share and store
+		4. Generate invitation with pointer to FileEntryCopy
+		5. Store invitation
+	*/
+
+	//1. Check recipient validity
+	_, ok := userlib.KeystoreGet(recipientUsername + "_PK")
+	if !ok {
+		return uuid.Nil, errors.New("CreateInvitation: Recipient not valid")
+	}
+
+	//2. Get User File List
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+
+	if !exist {
+		return uuid.Nil, errors.New("CreateInvitation: User File List not exist")
+	}
+
+	//Check integrity
+	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+
+	HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+	if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+		return uuid.Nil, errors.New("CreateInvitation: User File List no integrity")
+	}
+
+	//Decrypt UserFileList
+	UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+
+	curFileList := make(map[string]FileEntry)
+	err = json.Unmarshal(UserFileListBytes, &curFileList)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Error unmarshaling UserFileList")
+	}
+
+	curFileEntry, exist := curFileList[filename]
+	if !exist {
+		return uuid.Nil, errors.New("CreateInvitation: File entry not exist")
+	}
+
+	//3. Check metadata and filenode integrity
+	curFileMetaAddr := curFileEntry.FileMetaAddr
+	curFileMetaEncKey := curFileEntry.EncKey
+	curFileMetaHMACKey := curFileEntry.HMACKey
+
+	// Get metadata
+	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+	if !exist {
+		return uuid.Nil, errors.New("CreateInvitation: File metadata not exist")
+	}
+
+	// Check metadata integrity
+	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+	hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+		return uuid.Nil, errors.New("CreateInvitation: File metadata no integrity")
+	}
+
+	//4. Generate FileEntry copy for invitation
+	FileEntryCopy := FileEntry{
+		FileMetaAddr: curFileMetaAddr,
+		Status:       "Share",
+		HMACKey:      curFileMetaHMACKey,
+		EncKey:       curFileMetaEncKey,
+	}
+
+	// Store FileEntryCopy
+	ShareSymKey := userlib.RandomBytes(16)
+	ShareHMACKey := userlib.RandomBytes(16)
+
+	fileEntryCopyData, err := json.Marshal(FileEntryCopy)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Error marshaling FileEntryCopy")
+	}
+	fileEntryCopyEnc := userlib.SymEnc(ShareSymKey, userlib.RandomBytes(16), fileEntryCopyData)
+	fileEntryCopyHMAC, err := userlib.HMACEval(ShareHMACKey, fileEntryCopyEnc)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Error generating HMAC for FileEntryCopy")
+	}
+	fileEntryCopyEnc = append(fileEntryCopyEnc, fileEntryCopyHMAC...)
+	fileEntryCopyAddr := uuid.New()
+	userlib.DatastoreSet(fileEntryCopyAddr, fileEntryCopyEnc)
+
+	//5. Generate and store invitation
+	invitation := Invitation{
+		ShareAddr: fileEntryCopyAddr,
+		EncKey:    ShareSymKey,
+		HMACKey:   ShareHMACKey,
+	}
+	recipientPK, _ := userlib.KeystoreGet(recipientUsername + "_PK")
+	senderSK := userdata.DSKey
+	invitationData, err := json.Marshal(invitation)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Error marshaling invitation")
+	}
+	// userlib.DebugMsg("Invitation data size:%v", len(invitationData))
+	invitationEnc, err := userlib.PKEEnc(recipientPK, invitationData)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Error encrypting invitation")
+	}
+	invitationSign, err := userlib.DSSign(senderSK, invitationEnc)
+	if err != nil {
+		return uuid.Nil, errors.New("CreateInvitation: Store invitation failed")
+	}
+	userlib.DatastoreSet(invitationPtr, append(invitationEnc, invitationSign...))
+
+	return invitationPtr, err
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
-	return nil
+	/*
+		1. Check sender validity
+		2. Get invitation and check integrity
+		3. Get FileEntryCopy and check integrity
+		4. Get UserFileList
+		5. Add NewFileEntry to UserFileList
+		6. Delete invitation
+		7. Update ShareList
+		8. Store UserFileList
+	*/
+
+	//1. Check sender validity
+	senderSK, ok := userlib.KeystoreGet(senderUsername + "_Sign")
+	if !ok {
+		return errors.New("AcceptInvitation: Sender not valid")
+	}
+
+	//2. Get invitation and check integrity
+	invitationEnc, exist := userlib.DatastoreGet(invitationPtr)
+	if !exist {
+		return errors.New("AcceptInvitation: Invitation not exist")
+	}
+	if len(invitationEnc) < 256 {
+		return errors.New("AcceptInvitation: Invitation has been tampered")
+	}
+	// Check signature
+	invitationSign := invitationEnc[len(invitationEnc)-256:]
+	invitationEnc = invitationEnc[:len(invitationEnc)-256]
+	err := userlib.DSVerify(senderSK, invitationEnc, invitationSign)
+	if err != nil {
+		return errors.New("AcceptInvitation: Invitation signature verification failed")
+	}
+	// Decrypt invitation
+	invitationData, err := userlib.PKEDec(userdata.PrivateKey, invitationEnc)
+	if err != nil {
+		return errors.New("AcceptInvitation: Integrity compromised")
+	}
+	var curInvitation Invitation
+	err = json.Unmarshal(invitationData, &curInvitation)
+	if err != nil {
+		return errors.New("AcceptInvitation: Error unmarshaling invitation")
+	}
+
+	//3. Get FileEntryCopy and check integrity
+	curFileCopyAddr := curInvitation.ShareAddr
+	curFileCopyEncKey := curInvitation.EncKey
+	curFileCopyHMACKey := curInvitation.HMACKey
+
+	curFileCopyEnc, exist := userlib.DatastoreGet(curFileCopyAddr)
+	if !exist {
+		return errors.New("AcceptInvitation: FileEntryCopy not exist")
+	}
+
+	curFileCopyHMAC := curFileCopyEnc[len(curFileCopyEnc)-64:]
+	hmacCal, err := userlib.HMACEval(curFileCopyHMACKey, curFileCopyEnc[:len(curFileCopyEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, curFileCopyHMAC) {
+		return errors.New("AcceptInvitation: FileEntryCopy no integrity")
+	}
+
+	curFileCopy := userlib.SymDec(curFileCopyEncKey, curFileCopyEnc[:len(curFileCopyEnc)-64])
+	var newFileEntry FileEntry
+	err = json.Unmarshal(curFileCopy, &newFileEntry)
+	if err != nil {
+		return errors.New("AcceptInvitation: Error unmarshaling FileEntryCopy")
+	}
+
+	//4. Get UserFileList
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+	userlib.DebugMsg("UserFileListBytes: %v", UserFileListBytes)
+	curFileList := make(map[string]FileEntry)
+	if exist {
+		// Check integrity
+		userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+		userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+
+		HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+		if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+			return errors.New("AcceptInvitation: User File List no integrity")
+		}
+
+		// Decrypt UserFileList
+		UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+		err = json.Unmarshal(UserFileListBytes, &curFileList)
+		if err != nil {
+			return errors.New("Accept: Error unmarshaling UserFileList")
+		}
+	}
+
+	//5. Add FileEntryCopy to UserFileList
+	_, exist = curFileList[filename]
+	if exist {
+		return errors.New("AcceptInvitation: File already exist")
+	} else {
+		newFileEntry.Status = "received"
+		curFileList[filename] = newFileEntry
+	}
+
+	//6. Delete invitation info
+	userlib.DatastoreDelete(invitationPtr)
+	userlib.DatastoreDelete(curFileCopyAddr)
+
+	//7. Update Share List
+
+	//8. Store UserFileList
+	fileListBytes, _ := json.Marshal(curFileList)
+	IV := userlib.RandomBytes(16)
+	FileListEnc := userlib.SymEnc(SymKey, IV, fileListBytes)
+	FileListHMAC, err := userlib.HMACEval(HMACKey, FileListEnc)
+	fileListBytes = append(FileListEnc, FileListHMAC...)
+	userlib.DatastoreSet(UserFileListAddr, fileListBytes)
+
+	return err
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
