@@ -113,7 +113,7 @@ type User struct {
 }
 
 type FileEntry struct {
-	FileMetaAddr userlib.UUID
+	FileMetaAddr userlib.UUID //If owner -> metadata addr, if share -> share struct addr
 	Status       string //Own or Share or Received
 
 	EncKey  []byte //For file metadata
@@ -123,7 +123,9 @@ type FileEntry struct {
 type FileMetaData struct {
 	//Owner and Share Info
 	Owner     string
-	ShareList userlib.UUID
+	ShareListAddr userlib.UUID
+	//Record: sender, recipient, sourceKey, filename
+	//Pointer to ShareList： map[string][]ShareEntry
 
 	//File Info
 	FileName     string
@@ -140,15 +142,17 @@ type FileNode struct {
 	Next        userlib.UUID
 }
 
-type Invitation struct {
+type Invitation struct { //For safe create and accept invitation
 	ShareAddr userlib.UUID
 	EncKey    []byte
 	HMACKey   []byte
 }
 
 type ShareEntry struct {
-	Sender    string
-	Recipient string
+	Sender      string
+	Recipient   string
+	SourceKey   []byte //For Recipient's UserFileList
+	FileName    string
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -324,6 +328,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		curFileMeta.HMACKey = fileHMACKey
 		curFileMeta.StartAddress = startAddr
 		curFileMeta.NextAddress = curFileNode.Next
+		curFileMeta.ShareListAddr = uuid.New()
 
 		//Metadata keys
 		metadataEncKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("metadataEncKey"))
@@ -788,8 +793,10 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 		4. Get UserFileList
 		5. Add NewFileEntry to UserFileList
 		6. Delete invitation
-		7. Update ShareList
-		8. Store UserFileList
+		7. Get FileMetadata
+		8. Update ShareList
+		9. Store FileMetadata
+		10. Store UserFileList
 	*/
 
 	//1. Check sender validity
@@ -880,7 +887,7 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	if exist {
 		return errors.New("AcceptInvitation: File already exist")
 	} else {
-		newFileEntry.Status = "received"
+		newFileEntry.Status = "Received"
 		curFileList[filename] = newFileEntry
 	}
 
@@ -888,13 +895,89 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	userlib.DatastoreDelete(invitationPtr)
 	userlib.DatastoreDelete(curFileCopyAddr)
 
-	//7. Update Share List
+	//7. Decrypt File Metadata
+	curFileMetaAddr := newFileEntry.FileMetaAddr
+	curFileMetaEncKey := newFileEntry.EncKey
+	curFileMetaHMACKey := newFileEntry.HMACKey
 
-	//8. Store UserFileList
-	fileListBytes, _ := json.Marshal(curFileList)
+	// Get metadata
+	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+	if !exist {
+		return errors.New("AcceptInvitation: File metadata not exist")
+	}
+
+	// Check metadata integrity
+	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+	hmacCal, err = userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+		return errors.New("AcceptInvitation: File metadata no integrity")
+	}
+
+	// Decrypt metadata
+	fileMetaBytes := userlib.SymDec(curFileMetaEncKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	var fileMeta FileMetaData
+	err = json.Unmarshal(fileMetaBytes, &fileMeta)
+	if err != nil {
+		return errors.New("AcceptInvitation: Error unmarshaling FileMetadata")
+	}
+
+	//8. Update Share List
+	curShareList := make(map[string][]ShareEntry)
+	ShareListData, exist := userlib.DatastoreGet(fileMeta.ShareListAddr)
+	
+	// If ShareList exists, unmarshal it
+	if exist {
+		err := json.Unmarshal(ShareListData, &curShareList)
+		if err != nil {
+			return errors.New("Error unmarshaling ShareList")
+		}
+	}
+
+	// Check File list if have same entry
+	senderShareRecord, exist := curShareList[senderUsername]
+	if exist{
+			for _, shareEntry := range senderShareRecord {
+			if shareEntry.Recipient == userdata.Username {
+				return errors.New("AcceptInvitation: Already shared with this recipient")
+			}
+		}
+	}
+
+	// Add new entry to ShareList
+	newShareEntry := ShareEntry {
+		Sender: senderUsername,
+		Recipient: userdata.Username,
+		SourceKey: userdata.SourceKey,
+		FileName: filename,
+	}
+	curShareList[senderUsername] = append(curShareList[senderUsername], newShareEntry)
+
+	// Store ShareList
+	newShareListData, err := json.Marshal(curShareList)
+	if err != nil {
+		return errors.New("Error marshaling ShareList")
+	}
+	userlib.DatastoreSet(fileMeta.ShareListAddr, newShareListData)
+
+	//9. Store FileMetadata
+	metadataBytes, err := json.Marshal(fileMeta)
 	IV := userlib.RandomBytes(16)
+	metadataEnc := userlib.SymEnc(curFileMetaEncKey, IV, metadataBytes)
+	metadataHMAC, err := userlib.HMACEval(curFileMetaHMACKey, metadataEnc)
+	if err != nil {
+		return errors.New("AcceptInvitation: Error store FileMetadata")
+	}
+	metadataEnc = append(metadataEnc, metadataHMAC...)
+	userlib.DatastoreSet(curFileMetaAddr, metadataEnc)
+
+	//10. Store UserFileList
+	fileListBytes, _ := json.Marshal(curFileList)
+	IV = userlib.RandomBytes(16)
 	FileListEnc := userlib.SymEnc(SymKey, IV, fileListBytes)
 	FileListHMAC, err := userlib.HMACEval(HMACKey, FileListEnc)
+	if err != nil {
+		return errors.New("AcceptInvitation: Error store UserFileList")
+	}
 	fileListBytes = append(FileListEnc, FileListHMAC...)
 	userlib.DatastoreSet(UserFileListAddr, fileListBytes)
 
@@ -902,5 +985,381 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
-	return nil
+	/*
+		1. Get UserFileList
+		2. Check if file exist
+		3. Get FileMetadata and Check integrity
+		4. Check if user is the owner
+		5. Get ShareList
+		6. Check if recipient exist
+		7. If the recipient user exists, traverse the list of shared users and divide them into two lists: 
+           a) Users related to the recipient that need to have their access revoked.
+           b) Other valid users with access to the file.
+		8. Delete all file entries that need to be revoked
+		9. Create new file node and store
+		10.Create new share list and store
+		11.Create new filemetadata and store (Change addr to prevent replay attack)
+		12.Update fileEntry for other users and store file list
+	*/
+
+	//1. Get UserFileList
+	SymKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+	HMACKey, err := userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+	UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+
+	if !exist {
+		return errors.New("RevokeAccess: User File List not exist")
+	}
+
+	// Check integrity
+	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+
+	HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+	if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+		return errors.New("RevokeAccess: Original User File List no integrity")
+	}
+
+	// Decrypt UserFileList
+	UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+	curFileList := make(map[string]FileEntry)
+	err = json.Unmarshal(UserFileListBytes, &curFileList)
+	if err != nil {
+		return errors.New("RevokeAccess: Error unmarshaling UserFileList")
+	}
+
+	//2. Check if file exist
+	curFileEntry, exist := curFileList[filename]
+	if !exist {
+		return errors.New("RevokeAccess: File not exist")
+	}
+
+	//3. Get FileMetadata and Check integrity
+	curFileMetaAddr := curFileEntry.FileMetaAddr
+	curFileMetaEncKey := curFileEntry.EncKey
+	curFileMetaHMACKey := curFileEntry.HMACKey
+
+	// Get metadata
+	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
+	if !exist {
+		return errors.New("RevokeAccess: File metadata not exist")
+	}
+
+	// Check metadata integrity
+	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
+	hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	if err != nil || !userlib.HMACEqual(hmacCal, fileMetaHMAC) {
+		return errors.New("RevokeAccess: File metadata no integrity")
+	}
+
+	// Decrypt metadata
+	fileMetaBytes := userlib.SymDec(curFileMetaEncKey, fileMetaEnc[:len(fileMetaEnc)-64])
+	var fileMeta FileMetaData
+	err = json.Unmarshal(fileMetaBytes, &fileMeta)
+	if err != nil {
+		return errors.New("RevokeAccess: Error unmarshaling FileMetaData")
+	}
+
+	//4. Check if user is the owner
+	if fileMeta.Owner != userdata.Username {
+		return errors.New("RevokeAccess: Only owner can revoke access")
+	}
+
+	//5. Get ShareList
+	curShareList := make(map[string][]ShareEntry)
+	ShareListData, exist := userlib.DatastoreGet(fileMeta.ShareListAddr)
+	if !exist {
+		return errors.New("RevokeAccess: ShareList not exist")
+	}
+	// Unmarshal ShareList
+	err = json.Unmarshal(ShareListData, &curShareList)
+	if err != nil {
+		return errors.New("Error unmarshaling ShareList")
+	}
+
+	//6. Check if recipient exist
+	senderShareRecord, exist := curShareList[userdata.Username]
+	if !exist {
+		return errors.New("RevokeAccess: No share record for this file")
+	}
+
+	recipientExists := false
+	var originalShare ShareEntry
+	for _, shareEntry := range senderShareRecord {
+		if shareEntry.Recipient == recipientUsername {
+			recipientExists = true
+			originalShare = shareEntry
+			break
+		}
+	}
+	
+	if !recipientExists {
+		return errors.New("RevokeAccess: Recipient does not exist in share record")
+	}
+
+	// 7. Traverse ShareList to divide in 2 list
+	revokeUsers := make(map[string][]ShareEntry)
+	validUsers := make(map[string][]ShareEntry)
+
+	// Add original share entry (sender to recipient)
+	revokeUsers[userdata.Username] = []ShareEntry{originalShare}
+
+	// BFS queue
+	queue := []string{recipientUsername}
+	for len(queue) > 0 {
+		currentUser := queue[0]
+		queue = queue[1:]
+		// Find all users that have been shared by current user
+		for _, shareEntry := range curShareList[currentUser] {
+			if _, exist := revokeUsers[shareEntry.Recipient]; !exist {
+				// If current recipient not in revoke list, add to revoke list and queue
+				revokeUsers[shareEntry.Sender] = curShareList[shareEntry.Sender]
+				queue = append(queue, shareEntry.Recipient)
+			}
+		}
+	}
+
+	// Add all other users to valid list
+	for username, shareEntries := range curShareList {
+		if _, exist := revokeUsers[username]; !exist {
+			validUsers[username] = shareEntries
+		}
+	}
+
+	// 8. Delete all file entries that need to be revoked
+	for _, shareEntries := range revokeUsers {
+		for _, shareEntry := range shareEntries {
+			// Fetch user file list
+			UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(shareEntry.Recipient + "UserFileList"))[:16])
+			UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+	
+			if !exist {
+				return errors.New("RevokeAccess: Revoking User File List not exist")
+			}
+	
+			// Decrypt user file list
+			SymKey, _ := userlib.HashKDF(shareEntry.SourceKey, []byte("UserFileListEncKey"))
+			SymKey = SymKey[:16]
+			HMACKey, _ := userlib.HashKDF(shareEntry.SourceKey, []byte("UserFileListHMACKey"))
+			HMACKey = HMACKey[:16]
+			
+			// Check integrity
+			userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+			userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+	
+			HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+			if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+				return errors.New("RevokeAccess: Revoking User File List no integrity")
+			}
+	
+			// Decrypt and unmarshal UserFileList
+			UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+			userFileList := make(map[string]FileEntry)
+			err = json.Unmarshal(UserFileListBytes, &userFileList)
+			if err != nil {
+				return errors.New("RevokeAccess: Error unmarshaling UserFileList")
+			}
+	
+			// Delete corresponding file entry
+			_, exist = userFileList[shareEntry.FileName]
+			if !exist {
+				return errors.New("RevokeAccess: Revoking File entry not exist")
+			}
+
+			delete(userFileList, shareEntry.FileName)
+
+			// Marshal and encrypt updated UserFileList
+			UserFileListBytes, err = json.Marshal(userFileList)
+			if err != nil {
+				return errors.New("RevokeAccess: Error marshaling revoking UserFileList")
+			}
+			UserFileListEnc := userlib.SymEnc(SymKey, userlib.RandomBytes(16), UserFileListBytes)
+			UserFileListHMAC, err := userlib.HMACEval(HMACKey, UserFileListEnc)
+			if err != nil {
+				return errors.New("RevokeAccess: Error calculating revoking UserFileList HMAC")
+			}
+
+			// Store updated UserFileList
+			UserFileListEnc = append(UserFileListEnc, UserFileListHMAC...)
+			userlib.DatastoreSet(UserFileListAddr, UserFileListEnc)
+		}
+	}
+
+	// 9. Create new File Node and store
+	// Load file content
+	fileContent, err := userdata.LoadFile(filename)
+	if err != nil {
+		return errors.New("RevokeAccess: Error loading file")
+	}
+
+	// Create new file node
+	var newFileNode FileNode
+	newStartAddr := uuid.New()
+	newFileNode.FileContent = fileContent
+	newFileNode.Next = uuid.New()
+
+	// Generate file keys
+	newFileEncKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("fileEncKey"))
+	newFileEncKey = newFileEncKey[:16]
+
+	newFileHMACKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("fileHMACKey"))
+	newFileHMACKey = newFileHMACKey[:16]
+	if err != nil {
+		return errors.New("RevokeAccess: Fail to generate file keys")
+	}
+
+	// Store file node
+	fileNodeData, err := json.Marshal(newFileNode)
+	IV := userlib.RandomBytes(16)
+	fileNodeEnc := userlib.SymEnc(newFileEncKey, IV, fileNodeData)
+	fileNodeHMAC, err := userlib.HMACEval(newFileHMACKey, fileNodeEnc)
+	fileNodeEnc = append(fileNodeEnc, fileNodeHMAC...)
+	userlib.DatastoreSet(newStartAddr, fileNodeEnc)
+
+	// 10. Store new share list
+	newShareListAddr := uuid.New()
+	newShareList, err := json.Marshal(validUsers)
+	if err != nil {
+		return errors.New("RevokeAccess: Error marshaling new ShareList")
+	}
+	userlib.DatastoreSet(newShareListAddr, newShareList)
+
+	// 11. Store new file metadata
+	// Create file metadata
+	newFileMeta := FileMetaData{
+		Owner:          userdata.Username,
+		FileName:       filename,
+		FileEncKey:     newFileEncKey,
+		HMACKey:        newFileHMACKey,
+		StartAddress:   newStartAddr,
+		NextAddress:    newFileNode.Next,
+		ShareListAddr:  newShareListAddr,
+	}
+
+	// Metadata keys
+	newMetadataEncKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("metadataEncKey"))
+	newMetadataEncKey = newMetadataEncKey[:16]
+	newMetadataHMACKey, err := userlib.HashKDF(userlib.RandomBytes(16), []byte("metadataHMACKey"))
+	newMetadataHMACKey = newMetadataHMACKey[:16]
+	if err != nil {
+		return errors.New("RevokeAccess: Fail to generate metadata keys")
+	}
+
+	// Store Metadata
+	newMetadataBytes, err := json.Marshal(newFileMeta)
+	newMetadataEnc := userlib.SymEnc(newMetadataEncKey, userlib.RandomBytes(16), newMetadataBytes)
+	newMetadataHMAC, err := userlib.HMACEval(newMetadataHMACKey, newMetadataEnc)
+	if err != nil {
+		return errors.New("RevokeAccess: Fail to generate metadata HMAC")
+	}
+	newMetadataEnc = append(newMetadataEnc, newMetadataHMAC...)
+	newMetadataAddr := uuid.New()
+	userlib.DatastoreSet(newMetadataAddr, newMetadataEnc)
+
+	// 12. Update valid users' file list
+	userlib.DebugMsg("ShareList: %v", curShareList)
+	userlib.DebugMsg("Revoke users: %v", revokeUsers)
+	userlib.DebugMsg("Valid users: %v", validUsers)
+	for _, shareEntries := range validUsers {
+		for _, shareEntry := range shareEntries {
+			// Fetch user file list
+			UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(shareEntry.Recipient + "UserFileList"))[:16])
+			UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+	
+			if !exist {
+				return errors.New("RevokeAccess: Valid User File List not exist")
+			}
+	
+			// Decrypt user file list
+			SymKey, _ := userlib.HashKDF(shareEntry.SourceKey, []byte("UserFileListEncKey"))
+			SymKey = SymKey[:16]
+			HMACKey, _ := userlib.HashKDF(shareEntry.SourceKey, []byte("UserFileListHMACKey"))
+			HMACKey = HMACKey[:16]
+	
+			// Check integrity
+			userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
+			userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
+	
+			HMACCal, _ := userlib.HMACEval(HMACKey, userFileListEnc)
+			if !userlib.HMACEqual(HMACCal, userFileListHMAC) {
+				return errors.New("RevokeAccess: Valid User File List no integrity")
+			}
+	
+			// Decrypt and unmarshal UserFileList
+			UserFileListBytes = userlib.SymDec(SymKey, userFileListEnc)
+			userFileList := make(map[string]FileEntry)
+			err = json.Unmarshal(UserFileListBytes, &userFileList)
+			if err != nil {
+				return errors.New("RevokeAccess: Error unmarshaling Valid UserFileList")
+			}
+	
+			// Update corresponding file entry
+			fileEntry, exist := userFileList[shareEntry.FileName]
+			if !exist {
+				return errors.New("RevokeAccess: Valid File entry not exist")
+			}
+	
+			fileEntry.FileMetaAddr = newMetadataAddr
+			fileEntry.EncKey = newMetadataEncKey
+			fileEntry.HMACKey = newMetadataHMACKey
+			fileEntry.Status = "Received"
+			userFileList[shareEntry.FileName] = fileEntry
+	
+			// Marshal and encrypt updated UserFileList
+			UserFileListBytes, err = json.Marshal(userFileList)
+			if err != nil {
+				return errors.New("RevokeAccess: Error marshaling valid UserFileList")
+			}
+			UserFileListEnc := userlib.SymEnc(SymKey, userlib.RandomBytes(16), UserFileListBytes)
+			UserFileListHMAC, err := userlib.HMACEval(HMACKey, UserFileListEnc)
+			if err != nil {
+				return errors.New("RevokeAccess: Error generating HMAC for valid UserFileList")
+			}
+	
+			// Store updated UserFileList
+			UserFileListEnc = append(UserFileListEnc, UserFileListHMAC...)
+			userlib.DatastoreSet(UserFileListAddr, UserFileListEnc)
+		}
+	}
+
+	// 13. Update the file entry in the owner's file list
+	curFileEntry.FileMetaAddr = newMetadataAddr
+	curFileEntry.EncKey = newMetadataEncKey
+	curFileEntry.HMACKey = newMetadataHMACKey
+	curFileEntry.Status = "Own"
+	curFileList[filename] = curFileEntry
+
+	//Calculate uuid for UserFileList
+	UserFileListAddr, err = uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
+
+	//Calculate user file list EncKey from Source Key
+	SymKey, err = userlib.HashKDF(userdata.SourceKey, []byte("UserFileListEncKey"))
+	SymKey = SymKey[:16]
+
+	//Calculate user file list HMACKey from Source Key
+	HMACKey, err = userlib.HashKDF(userdata.SourceKey, []byte("UserFileListHMACKey"))
+	HMACKey = HMACKey[:16]
+
+	// Marshal and encrypt the updated file list
+	updatedUserFileListBytes, err := json.Marshal(curFileList)
+	if err != nil {
+		return errors.New("RevokeAccess: Error marshaling updated own file list")
+	}
+	updatedUserFileListEnc := userlib.SymEnc(SymKey, userlib.RandomBytes(16), updatedUserFileListBytes)
+	updatedUserFileListHMAC, err := userlib.HMACEval(HMACKey, updatedUserFileListEnc)
+	if err != nil {
+		return errors.New("RevokeAccess: Error generating HMAC for updated own file list")
+	}
+
+	// Store the updated file list
+	updatedUserFileListEnc = append(updatedUserFileListEnc, updatedUserFileListHMAC...)
+	userlib.DatastoreSet(UserFileListAddr, updatedUserFileListEnc)
+
+	userlib.DebugMsg("curFileList: %v", curFileList)
+
+	return err
 }
