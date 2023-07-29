@@ -85,7 +85,6 @@ var _ = Describe("Client Tests", func() {
 	})
 
 	Describe("Basic Tests", func() {
-
 		Specify("Basic Test: Testing InitUser/GetUser on a single user.", func() {
 			userlib.DebugMsg("Initializing user Alice.")
 			alice, err = client.InitUser("alice", defaultPassword)
@@ -872,7 +871,6 @@ var _ = Describe("Client Tests", func() {
 
 	Describe("Integrity test", func() {
 		var datastore map[userlib.UUID][]byte
-
 		It("Swap two file entries", func() {
 			alice, _ = client.InitUser("alice", defaultPassword)
 			datastore = userlib.DatastoreGetMap()
@@ -958,6 +956,208 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).ToNot(BeNil())
 		})
 	})
+
+	Describe("Data Tampering",func(){
+		It("Tampering data after creating invitation", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			bob, err = client.InitUser("bob", defaultPassword)
+
+			err = alice.StoreFile(aliceFile, userlib.RandomBytes(1000))
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			// Tamper with aliceFile
+			currentMap := make(map[uuid.UUID][]byte)
+			for k, v := range userlib.DatastoreGetMap() {
+				currentMap[k] = v
+			}
+
+			err = alice.AppendToFile(aliceFile, []byte("Add something"))
+			Expect(err).To(BeNil())
+
+			userMap := userlib.DatastoreGetMap()
+			for k := range userMap {
+				if !bytesEqual(userMap[k], currentMap[k]) {
+					userlib.DatastoreSet(k, []byte("tamper content"))
+				}
+			}
+			
+			// We haven't changed anything with bob's copy of the file
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+			
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+		})
+
+		It("Tampering with all the content in the datastore", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+
+			userlib.DebugMsg("Tampering with all the content")
+			datastoreMap := userlib.DatastoreGetMap()
+
+			for key, _ := range datastoreMap {
+				userlib.DatastoreSet(key, []byte("Tamper content"))
+			}			
+
+			// Alice can't loadFile now
+			_, err := alice.LoadFile(aliceFile)
+			Expect(err).ToNot(BeNil())
+
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+		
+			bob, err = client.InitUser("bob", defaultPassword)
+			_, err = alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+
+			// Also alice should be missing too now
+			_, err = client.GetUser("alice", defaultPassword)
+			Expect(err).ToNot(BeNil())
+
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			_, err = alice.LoadFile(aliceFile)
+			Expect(err).ToNot(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+		})
+
+		It("Tamper with accepting invitation", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			bob, err = client.InitUser("bob", defaultPassword)
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Tamper with accepting invitation")
+			// Tamper with invitation
+			currentMap := make(map[uuid.UUID][]byte)
+			for k, v := range userlib.DatastoreGetMap() {
+				currentMap[k] = v
+			}
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+
+			userMap := userlib.DatastoreGetMap()
+			for k := range userMap {
+				if !bytesEqual(userMap[k], currentMap[k]) {
+					userlib.DatastoreSet(k, []byte("tamper content"))
+					userlib.DebugMsg("Tamper success")
+				}
+			}
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).ToNot(BeNil())
+
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			_, err = alice.LoadFile(aliceFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+		})
+
+		It("Tamper with loading file", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			bob, err = client.InitUser("bob", defaultPassword)
+			charles, err = client.InitUser("charles", defaultPassword)
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Tamper with loading file")
+			// Tamper with invitation
+			currentMap := make(map[uuid.UUID][]byte)
+			for k, v := range userlib.DatastoreGetMap() {
+				currentMap[k] = v
+			}
+
+			_, err = alice.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+
+			userMap := userlib.DatastoreGetMap()
+			for k := range userMap {
+				if !bytesEqual(userMap[k], currentMap[k]) {
+					userlib.DatastoreSet(k, []byte("tamper content"))
+					userlib.DebugMsg("Tamper success")
+				}
+			}
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			_, err = alice.CreateInvitation(aliceFile, "charles")
+			Expect(err).To(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			_, err = alice.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+
+			_, err = alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+		})
+	})
+
+	Describe("Effecient Append", func() {
+		Specify("Efficient Append", func() {
+			userlib.DebugMsg("Efficiency Append: Initializing Alice")
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			for i := 10000; i > 0; i-- {
+				alice.AppendToFile(aliceFile, []byte("hi extremely long text"))
+			}
+
+			bw1 := measureBandwidth(func() {
+				alice.AppendToFile(aliceFile, []byte("hi"))
+			})
+
+			Expect(bw1).To(BeNumerically("<", 3600))
+			
+
+		})
+
+		Specify("Efficiency Append: First append has 1000 words", func() {
+			userlib.DebugMsg("First Append: Initializing Alice")
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			var longText []byte
+			for i := 10000; i > 0; i-- {
+				longText = append(longText, []byte("rhinosaurus")...)
+			}
+
+			bw1 := measureBandwidth(func() {
+				alice.AppendToFile(aliceFile, []byte("hi"))
+			})
+
+			Expect(bw1).To(BeNumerically("<", 3600))
+		})
+
+	})
 })
 
 func getShortestKey(datastore map[userlib.UUID][]byte) userlib.UUID {
@@ -1019,4 +1219,11 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return equal
+}
+
+func measureBandwidth(probe func()) int {
+	before := userlib.DatastoreGetBandwidth()
+	probe()
+	after := userlib.DatastoreGetBandwidth()
+	return after - before
 }
