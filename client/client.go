@@ -369,6 +369,10 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 			return errors.New("StoreFile: File metadata not exist")
 		}
 
+		if len(fileMetaEnc) < 64 {
+			return errors.New("StoreFile: File metadata length < 64")
+		}
+
 		// Check metadata integrity
 		fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
 		hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
@@ -391,6 +395,10 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 			fileNodeEnc, exist := userlib.DatastoreGet(curAddr)
 			if !exist {
 				return errors.New("StoreFile: Old File Node not exist")
+			}
+
+			if len(fileNodeEnc) < 64 {
+				return errors.New("StoreFile: Old File Node length < 64")
 			}
 
 			// check file node integrity
@@ -477,6 +485,10 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 		return errors.New("AppendToFile: User File List not exist")
 	}
 
+	if len(UserFileListBytes) < 64 {
+		return errors.New("AppendToFile: User File List length < 64")
+	}
+
 	//Check integrity
 	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
 	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
@@ -508,6 +520,10 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
 	if !exist {
 		return errors.New("AppendToFile: File metadata not exist")
+	}
+
+	if len(fileMetaEnc) < 64 {
+		return errors.New("AppendToFile: File metadata length < 64")
 	}
 
 	// Check metadata integrity
@@ -573,6 +589,10 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 		return nil, errors.New("LoadFile: User File List not exist")
 	}
 
+	if len(UserFileListBytes) < 64 {
+		return nil, errors.New("LoadFile: User File List length < 64")
+	}
+
 	//Check integrity
 	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
 	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
@@ -611,6 +631,10 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 		return nil, errors.New("LoadFile: File metadata not exist")
 	}
 
+	if len(fileMetaEnc) < 64 {
+		return nil, errors.New("LoadFile: File metadata length < 64")
+	}
+
 	// Check metadata integrity
 	fileMetaHMAC := fileMetaEnc[len(fileMetaEnc)-64:]
 	hmacCal, err := userlib.HMACEval(curFileMetaHMACKey, fileMetaEnc[:len(fileMetaEnc)-64])
@@ -634,6 +658,10 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 		fileNodeEnc, exist := userlib.DatastoreGet(curAddr)
 		if !exist {
 			return nil, errors.New("LoadFile: File node not exist")
+		}
+
+		if len(fileNodeEnc) < 64 {
+			return nil, errors.New("LoadFile: File node length < 64")
 		}
 
 		// check file node integrity
@@ -693,6 +721,10 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		return uuid.Nil, errors.New("CreateInvitation: User File List not exist")
 	}
 
+	if len(UserFileListBytes) < 64 {
+		return uuid.Nil, errors.New("CreateInvitation: User File List length < 64")
+	}
+
 	//Check integrity
 	userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
 	userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
@@ -725,6 +757,10 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
 	if !exist {
 		return uuid.Nil, errors.New("CreateInvitation: File metadata not exist")
+	}
+
+	if len(fileMetaEnc) < 64 {
+		return uuid.Nil, errors.New("CreateInvitation: File metadata length < 64")
 	}
 
 	// Check metadata integrity
@@ -841,6 +877,10 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 		return errors.New("AcceptInvitation: FileEntryCopy not exist")
 	}
 
+	if len(curFileCopyEnc) < 64 {
+		return errors.New("AcceptInvitation: FileEntryCopy length < 64")
+	}
+
 	curFileCopyHMAC := curFileCopyEnc[len(curFileCopyEnc)-64:]
 	hmacCal, err := userlib.HMACEval(curFileCopyHMACKey, curFileCopyEnc[:len(curFileCopyEnc)-64])
 	if err != nil || !userlib.HMACEqual(hmacCal, curFileCopyHMAC) {
@@ -865,6 +905,10 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	userlib.DebugMsg("UserFileListBytes: %v", UserFileListBytes)
 	curFileList := make(map[string]FileEntry)
 	if exist {
+		if len(UserFileListBytes) < 64 {
+			return errors.New("AcceptInvitation: UserFileList length < 64")
+		}
+
 		// Check integrity
 		userFileListEnc := UserFileListBytes[:len(UserFileListBytes)-64]
 		userFileListHMAC := UserFileListBytes[len(UserFileListBytes)-64:]
@@ -904,6 +948,10 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
 	if !exist {
 		return errors.New("AcceptInvitation: File metadata not exist")
+	}
+
+	if len(fileMetaEnc) < 64 {
+		return errors.New("AcceptInvitation: File metadata length < 64")
 	}
 
 	// Check metadata integrity
@@ -1000,6 +1048,8 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 		10.Create new share list and store
 		11.Create new filemetadata and store (Change addr to prevent replay attack)
 		12.Update fileEntry for other users and store file list
+		13. Update the file entry in the owner's file list
+		14. Delete old file metadata, share list and file entry
 	*/
 
 	//1. Get UserFileList
@@ -1013,6 +1063,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 
 	if !exist {
 		return errors.New("RevokeAccess: User File List not exist")
+	}
+
+	if len(UserFileListBytes) < 64 {
+		return errors.New("RevokeAccess: User File List length < 64")
 	}
 
 	// Check integrity
@@ -1047,6 +1101,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	fileMetaEnc, exist := userlib.DatastoreGet(curFileMetaAddr)
 	if !exist {
 		return errors.New("RevokeAccess: File metadata not exist")
+	}
+
+	if len(fileMetaEnc) < 64 {
+		return errors.New("RevokeAccess: File metadata length < 64")
 	}
 
 	// Check metadata integrity
@@ -1113,20 +1171,38 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	for len(queue) > 0 {
 		currentUser := queue[0]
 		queue = queue[1:]
-		// Find all users that have been shared by current user
+		//Find all users that have been shared by current user
 		for _, shareEntry := range curShareList[currentUser] {
 			if _, exist := revokeUsers[shareEntry.Recipient]; !exist {
 				// If current recipient not in revoke list, add to revoke list and queue
-				revokeUsers[shareEntry.Sender] = curShareList[shareEntry.Sender]
+				revokeUsers[shareEntry.Sender] = append(revokeUsers[shareEntry.Sender], shareEntry)
 				queue = append(queue, shareEntry.Recipient)
 			}
 		}
 	}
 
 	// Add all other users to valid list
-	for username, shareEntries := range curShareList {
-		if _, exist := revokeUsers[username]; !exist {
-			validUsers[username] = shareEntries
+	// for username, shareEntries := range curShareList {
+	// 	if _, exist := revokeUsers[username]; !exist {
+	// 		validUsers[username] = shareEntries
+	// 	}
+	// }
+	for sender, shareEntries := range curShareList {
+		if sender == userdata.Username {
+			// If the sender is the original sender, remove the original share entry from his list
+			var validEntries []ShareEntry
+			for _, entry := range shareEntries {
+				if entry.Recipient != recipientUsername {
+					validEntries = append(validEntries, entry)
+				}
+			}
+			validUsers[sender] = validEntries
+		} else {
+			_, senderExistsInRevoke := revokeUsers[sender]
+			if !senderExistsInRevoke {
+				// If the sender is not the original sender and he is not in revokeUsers, add his entries to validUsers
+				validUsers[sender] = shareEntries
+			}
 		}
 	}
 
@@ -1139,6 +1215,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	
 			if !exist {
 				return errors.New("RevokeAccess: Revoking User File List not exist")
+			}
+
+			if len(UserFileListBytes) < 64 {
+				return errors.New("RevokeAccess: Revoking User File List length < 64")
 			}
 	
 			// Decrypt user file list
@@ -1269,9 +1349,14 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 			// Fetch user file list
 			UserFileListAddr, err := uuid.FromBytes(userlib.Hash([]byte(shareEntry.Recipient + "UserFileList"))[:16])
 			UserFileListBytes, exist := userlib.DatastoreGet(UserFileListAddr)
+			userlib.DebugMsg("UserName: %v", shareEntry.Recipient)
 	
 			if !exist {
 				return errors.New("RevokeAccess: Valid User File List not exist")
+			}
+
+			if len(UserFileListBytes) < 64 {
+				return errors.New("RevokeAccess: Valid User File List too short")
 			}
 	
 			// Decrypt user file list
@@ -1308,6 +1393,8 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 			fileEntry.HMACKey = newMetadataHMACKey
 			fileEntry.Status = "Received"
 			userFileList[shareEntry.FileName] = fileEntry
+
+			userlib.DebugMsg("FileMetaAddr: %v", fileEntry.FileMetaAddr)
 	
 			// Marshal and encrypt updated UserFileList
 			UserFileListBytes, err = json.Marshal(userFileList)
@@ -1332,6 +1419,9 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	curFileEntry.HMACKey = newMetadataHMACKey
 	curFileEntry.Status = "Own"
 	curFileList[filename] = curFileEntry
+
+	userlib.DebugMsg("UserName: %v", userdata.Username)
+	userlib.DebugMsg("FileMetaAddr: %v", curFileEntry.FileMetaAddr)
 
 	//Calculate uuid for UserFileList
 	UserFileListAddr, err = uuid.FromBytes(userlib.Hash([]byte(userdata.Username + "UserFileList"))[:16])
@@ -1359,7 +1449,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	updatedUserFileListEnc = append(updatedUserFileListEnc, updatedUserFileListHMAC...)
 	userlib.DatastoreSet(UserFileListAddr, updatedUserFileListEnc)
 
-	userlib.DebugMsg("curFileList: %v", curFileList)
+	// 14. Delete old filemetadata, filenode, sharelist
+	userlib.DatastoreDelete(fileMeta.ShareListAddr)
+	userlib.DatastoreDelete(fileMeta.StartAddress)
+	userlib.DatastoreDelete(curFileMetaAddr)
 
 	return err
 }
